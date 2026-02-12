@@ -272,13 +272,19 @@ export default class DiscordLiveServerStatus extends BasePlugin {
   async findExistingMessage() {
     if (!this.channel) return;
     try {
-      const messages = await this.channel.messages.fetch({ limit: 30 });
+      const messages = await this.channel.messages.fetch({ limit: 50 });
+      const botId = this.options.discordClient.user.id;
+
       const botMsg = messages.find(
-        (m) => m.author.id === this.options.discordClient.user.id && m.embeds.length > 0
+        (m) => m.author.id === botId && m.embeds.length > 0
       );
+
       if (botMsg) {
         this.statusMessage = botMsg;
-        this.verbose(1, 'Found existing status message – will edit it.');
+        this.lastMapKey = this.getMapImageKey();
+        this.verbose(1, `Found existing status message (ID: ${botMsg.id}) – will edit it.`);
+      } else {
+        this.verbose(1, 'No existing status message found – will create a new one.');
       }
     } catch (err) {
       this.verbose(1, `Could not search existing messages: ${err.message}`);
@@ -293,8 +299,30 @@ export default class DiscordLiveServerStatus extends BasePlugin {
   getMapImagePath() {
     const key = this.getMapImageKey();
     if (!key) return null;
-    const imagePath = path.join(__dirname, 'maps', `${key}.png`);
-    return fs.existsSync(imagePath) ? imagePath : null;
+
+    const exactPath = path.join(__dirname, 'maps', `${key}.png`);
+    if (fs.existsSync(exactPath)) return exactPath;
+
+    try {
+      const mapsDir = path.join(__dirname, 'maps');
+      if (!fs.existsSync(mapsDir)) return null;
+      const files = fs.readdirSync(mapsDir).filter((f) => f.endsWith('.png'));
+
+      const match = files.find((f) => {
+        const fname = f.replace('.png', '').toLowerCase();
+        return fname === key || key.includes(fname) || fname.includes(key);
+      });
+
+      if (match) {
+        this.verbose(2, `Map image fuzzy matched: '${key}' → '${match}'`);
+        return path.join(mapsDir, match);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    this.verbose(2, `No map image found for key: '${key}'`);
+    return null;
   }
 
   getTimeAgo(startTime) {
@@ -365,7 +393,6 @@ export default class DiscordLiveServerStatus extends BasePlugin {
     } catch (_) {
     }
 
-    // ── 2. Layer metadata ──
     if (layer.teams?.length >= 2) {
       team1Faction = layer.teams[0]?.faction || '';
       team2Faction = layer.teams[1]?.faction || '';
@@ -374,7 +401,6 @@ export default class DiscordLiveServerStatus extends BasePlugin {
       if (!team2Name) team2Name = layer.teams[1]?.name || layer.teams[1]?.faction || null;
     }
 
-    // ── 3. Layers database lookup ──
     if ((!team1Name || !team2Name) && Layers) {
       try {
         const candidates = [layer.layerid, layer.classname, layer.name, layer.map?.name].filter(
@@ -398,7 +424,6 @@ export default class DiscordLiveServerStatus extends BasePlugin {
       }
     }
 
-    // ── 4. Fallback ──
     if (!team1Name) team1Name = 'Team 1';
     if (!team2Name) team2Name = 'Team 2';
 
@@ -584,31 +609,40 @@ export default class DiscordLiveServerStatus extends BasePlugin {
     try {
       const message = await this.buildMessage();
       const currentMapKey = this.getMapImageKey();
+      const mapChanged = this.lastMapKey !== null && this.lastMapKey !== currentMapKey;
 
       if (this.statusMessage) {
-        if (this.lastMapKey !== currentMapKey) {
-          try {
-            await this.statusMessage.delete();
-          } catch (_) {
-          }
-          this.statusMessage = await this.channel.send(message);
-        } else {
-          try {
+        try {
+          if (mapChanged && message.files?.length) {
+            await this.statusMessage.edit({
+              embeds: message.embeds,
+              components: message.components,
+              files: message.files
+            });
+          } else {
             await this.statusMessage.edit({
               embeds: message.embeds,
               components: message.components
             });
-          } catch (err) {
-            this.verbose(1, `Edit failed, re-sending: ${err.message}`);
+          }
+          this.verbose(2, 'Server status embed updated (edited).');
+        } catch (err) {
+          this.verbose(1, `Edit failed (${err.message}), checking if message still exists...`);
+
+          try {
+            await this.channel.messages.fetch(this.statusMessage.id);
+            this.verbose(1, 'Message exists but edit failed – will retry next cycle.');
+          } catch (_) {
+            this.verbose(1, 'Message was deleted – sending a new one.');
             this.statusMessage = await this.channel.send(message);
           }
         }
       } else {
         this.statusMessage = await this.channel.send(message);
+        this.verbose(1, `New status message sent (ID: ${this.statusMessage.id}).`);
       }
 
       this.lastMapKey = currentMapKey;
-      this.verbose(2, 'Server status embed updated.');
     } catch (err) {
       this.verbose(1, `Failed to update embed: ${err.message}`);
     }
