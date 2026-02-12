@@ -149,6 +149,7 @@ export default class DiscordLiveServerStatus extends BasePlugin {
     this.lastMapKey = null;
     this.channel = null;
     this.resolvedEmojiMap = {};
+    this.cachedRconInfo = null;
 
     this.updateEmbed = this.updateEmbed.bind(this);
     this.updateBotStatus = this.updateBotStatus.bind(this);
@@ -293,7 +294,15 @@ export default class DiscordLiveServerStatus extends BasePlugin {
 
   getMapImageKey() {
     const mapName = this.server.currentLayer?.map?.name || '';
-    return mapName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    if (mapName) return mapName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+    const rconLayer = this.cachedRconInfo?.MapName_s;
+    if (rconLayer) {
+      const parsed = this.parseLayerClassname(rconLayer);
+      if (parsed.mapName) return parsed.mapName.toLowerCase();
+    }
+
+    return '';
   }
 
   getMapImagePath() {
@@ -358,6 +367,34 @@ export default class DiscordLiveServerStatus extends BasePlugin {
     return name;
   }
 
+  parseLayerClassname(classname) {
+    if (!classname) return { mapName: null, gamemode: null };
+    const parts = classname.split('_');
+    const mapName = parts[0] || null;
+
+    const KNOWN_GAMEMODES = [
+      'AAS', 'RAAS', 'Invasion', 'TC', 'Skirmish', 'Seed',
+      'Destruction', 'Insurgency', 'Training', 'Track', 'Tanks'
+    ];
+    let gamemode = null;
+    for (let i = 1; i < parts.length; i++) {
+      const found = KNOWN_GAMEMODES.find((g) => g.toUpperCase() === parts[i].toUpperCase());
+      if (found) {
+        gamemode = found;
+        break;
+      }
+    }
+
+    return { mapName, gamemode };
+  }
+
+  formatMapName(raw) {
+    if (!raw) return null;
+    return raw
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+  }
+
   // ───────────────────── Team Data ─────────────────────
 
   async getTeamData() {
@@ -382,6 +419,7 @@ export default class DiscordLiveServerStatus extends BasePlugin {
           try {
             const info = JSON.parse(raw);
             if (info) {
+              this.cachedRconInfo = info;
               team1Name = info.TeamOne_s || null;
               team2Name = info.TeamTwo_s || null;
               this.verbose(3, `ShowServerInfo teams: '${team1Name}' vs '${team2Name}'`);
@@ -479,6 +517,18 @@ export default class DiscordLiveServerStatus extends BasePlugin {
     // ── Teams (async – RCON call) ──
     const td = await this.getTeamData();
 
+    let displayMapName = this.server.currentLayer?.map?.name || null;
+    let displayGamemode = this.server.currentLayer?.gamemode || null;
+
+    if (!displayMapName || !displayGamemode) {
+      const rconLayer = this.cachedRconInfo?.MapName_s;
+      if (rconLayer) {
+        const parsed = this.parseLayerClassname(rconLayer);
+        if (!displayMapName && parsed.mapName) displayMapName = this.formatMapName(parsed.mapName);
+        if (!displayGamemode) displayGamemode = parsed.gamemode;
+      }
+    }
+
     // ── Fields ──
     embed.addFields(
       { name: s.tps, value: `${tpsEmoji} ━━ TPS: **${tpsValue}**`, inline: false },
@@ -503,8 +553,8 @@ export default class DiscordLiveServerStatus extends BasePlugin {
         value: `${s.player}: **${td.team2.players}**\n${s.squad}: **${td.team2.squads}**`,
         inline: true
       },
-      { name: s.map, value: this.server.currentLayer?.map?.name || s.unknown, inline: false },
-      { name: s.gamemode, value: this.server.currentLayer?.gamemode || s.unknown, inline: false }
+      { name: s.map, value: displayMapName || s.unknown, inline: false },
+      { name: s.gamemode, value: displayGamemode || s.unknown, inline: false }
     );
 
     // ── Harita Görseli ──
